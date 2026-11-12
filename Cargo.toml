@@ -1,0 +1,20 @@
+[package]
+name = "dshot"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "MIT"
+description = "Bidirectional DShot for AM32 ESCs: frame encoder, the PIO frame image for four lines, and reply decoding. Pure integer code, no I/O."
+
+[features]
+defmt = ["dep:defmt"]
+_test-hooks = []
+
+[dependencies]
+defmt = { version = "1.0.1", optional = true }
+
+[workspace]
+exclude = ["hil"]
+
+[dev-dependencies]
+proptest = "1.12"
