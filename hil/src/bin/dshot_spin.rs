@@ -158,6 +158,10 @@ const ERPM_OVER_MAX: u32 = 10;
 /// Above this an eRPM reply is not a speed (143 000 rpm on 14 magnets): the ESC has been told to
 /// run and has not commutated yet.
 const UNSTARTED_ERPM: u32 = 1_000_000;
+const _: () = assert!(
+    ERPM_MAX < UNSTARTED_ERPM,
+    "DSHOT_SPIN_ERPM_MAX must be below 1 000 000: a reply above that is read as not started yet"
+);
 /// G6: "not started yet" replies in a row that stop the run (300 ms at 1 kHz).
 const UNSTARTED_MAX: u32 = 300;
 /// Exchanges per line kept for the report of an automatic stop.
