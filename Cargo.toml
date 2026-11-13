@@ -4,14 +4,24 @@ version = "0.1.0"
 edition = "2024"
 publish = false
 license = "MIT"
-description = "Bidirectional DShot for AM32 ESCs: frame encoder, the PIO frame image for four lines, and reply decoding. Pure integer code, no I/O."
+description = "Bidirectional DShot for AM32 ESCs. A hardware-independent core of frame encoding and reply decoding for four motor lines, and PioDshot: one PIO state machine driving four lines on the RP2350, for embassy-rp."
+repository = "https://github.com/Lmx154/dshot-rs"
+readme = "README.md"
+keywords = ["embedded", "no-std", "dshot", "esc", "rp2350"]
+categories = ["embedded", "no-std", "hardware-support"]
+rust-version = "1.99"
 
 [features]
-defmt = ["dep:defmt"]
+defmt = ["dep:defmt", "embassy-rp?/defmt"]
+# PioDshot for embassy-rp 0.10 (RP2350). The chip feature (rp235xa/rp235xb) comes from the application.
+embassy-rp-0-10 = ["dep:embassy-rp", "dep:embedded-hal-async"]
+# Test hooks, outside the API promise.
 _test-hooks = []
 
 [dependencies]
 defmt = { version = "1.0.1", optional = true }
+embassy-rp = { version = "0.10.0", default-features = false, optional = true }
+embedded-hal-async = { version = "1.0", optional = true }
 
 [workspace]
 exclude = ["hil"]

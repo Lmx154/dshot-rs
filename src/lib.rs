@@ -2,7 +2,9 @@
 //! frame encoder, the two-word frame image for the PIO program, the timing constants of that
 //! program, and the decoding of a reply word.
 //!
-//! Pure integer code: the crate does no I/O, owns no pin and has no timer. The caller builds a
+//! The core is pure integer code: it does no I/O, owns no pin and has no timer. The optional
+//! back-end `PioDshot` (feature `embassy-rp-0-10`, RP2350) runs the program on one PIO state
+//! machine and captures the replies. Without it, the caller builds a
 //! [`FrameImage`] from four [`LineFrame`]s, pushes its two words to the PIO back-end, and hands
 //! the words the program captured after the frame to [`decode_capture`], which gives one
 //! [`LineCapture`] per line (a reply decoded by [`decode_reply`], silence, a refused one, or a
@@ -18,7 +20,8 @@
 //!
 //! Examples: see README.md, whose examples are compiled by `cargo test`.
 #![no_std]
-#![forbid(unsafe_code)]
+#![cfg_attr(not(feature = "embassy-rp-0-10"), forbid(unsafe_code))]
+#![cfg_attr(feature = "embassy-rp-0-10", deny(unsafe_code))]
 #![warn(missing_docs)]
 #![cfg_attr(
     not(test),
@@ -40,6 +43,10 @@ extern crate std;
 
 mod capture;
 mod frame;
+mod link;
+#[cfg(feature = "embassy-rp-0-10")]
+mod pio_dshot;
+pub mod program;
 mod rate;
 mod reply;
 mod telemetry;
@@ -52,6 +59,9 @@ pub use capture::{
 pub use frame::FrameImage;
 #[cfg(feature = "_test-hooks")]
 pub use frame::corrupt_checksum;
+pub use link::{BREAK_MS, LineMonitor, LineState, PARK_MS};
+#[cfg(feature = "embassy-rp-0-10")]
+pub use pio_dshot::{BuildError, Exchange, NewError, Parts, PioDshot};
 pub use rate::{ClockDivider, DividerError, Rate};
 pub use reply::{Erpm, ExtendedTelemetry, Reply, ReplyError, decode_reply};
 pub use telemetry::{Framer, Telemetry};

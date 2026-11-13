@@ -8,8 +8,9 @@
 //!
 //! # The samples
 //!
-//! The PIO program does `in pins, 4` every 2 PIO cycles with autopush at 32 bits and the input
-//! shift register shifting LEFT (`probe: ShiftDirection::Left`), so:
+//! The PIO program does `in pins, 4` every 4 PIO cycles (the measurement program did it every 2)
+//! with autopush at 32 bits and the input shift register shifting LEFT
+//! (`ShiftDirection::Left`), so:
 //!
 //! - word `i` holds the samples `8 * i` to `8 * i + 7`;
 //! - sample `8 * i + j` is the nibble at bits `28 - 4 * j` to `31 - 4 * j`: the OLDEST sample is
@@ -17,9 +18,10 @@
 //! - bit `l` of a nibble is line `l` (GPIO36 + `l`): 1 is high;
 //! - the level before the first sample is high (the lines are released with their pull-ups).
 //!
-//! The first sample is taken 12 PIO cycles after the last rising edge of the frame the
-//! program sent, one more every 2 cycles ([`Rate::reply_samples_per_bit`](crate::Rate) of them
-//! in one nominal reply bit, 16 at both rates).
+//! In the back-end's program ([`crate::program`]) the first sample is taken 13 PIO cycles after
+//! the last rising edge of the frame, one more every 4 cycles
+//! ([`Rate::reply_samples_per_bit`](crate::Rate) of them in one nominal reply bit, 8 at both
+//! rates). The decoder itself takes any number from 4 to 64.
 //!
 //! # The method
 //!
@@ -37,11 +39,10 @@
 //!
 //! # Cost
 //!
-//! An estimate from the machine code for thumbv8m (not measured on a board): about 12
-//! instructions per word whether or not a line changed in it, and about 29 per edge, so some
-//! 3000 to 3800 cycles for a DShot300 window (68 words) in which all four lines carry a
-//! 16-edge reply, about 1100 when all four are silent. That is more than the 1500 cycles of the
-//! design budget; the code is correct first and has not been tuned further.
+//! An earlier machine-code estimate at 16 samples per bit was 3000 to 3800 cycles for a
+//! busy four-line capture. The back-end now uses 8 samples per bit; its measured cost is
+//! still pending. The current budget is a median of 3000 cycles at 150 MHz for a busy
+//! DShot600 capture (2700 cycles is the review threshold). See the crate README.
 //!
 //! # What is guaranteed
 //!
@@ -66,7 +67,9 @@
 //! - [`LineCapture::Silent`]: the line stayed high for the whole window.
 //! - [`LineCapture::Foreign`]: the line is low at the first sample, or shows a low longer than
 //!   3.5 nominal bits (the longest low in a reply is 3 symbols). A controller sitting in its
-//!   bootloader looks like this: lows of 30 to 52 us. It is never a reply and never
+//!   bootloader can look like this (lows of 30 to 52 us), and so can an application's reply
+//!   that comes late, at any phase, after a tune it played with interrupts off (measured once
+//!   per start, at the end of the arming silence). It is never a reply and never
 //!   [`LineCapture::Invalid`]. A reply that begins in the very first sample cannot be told from
 //!   a line that was already low; it is Foreign too. The real replies start 23 us or more after
 //!   the end of our frame.
@@ -105,8 +108,10 @@ pub enum LineCapture {
     Reply(Reply),
     /// Edges that look like a reply and do not decode, and why.
     Invalid(CaptureError),
-    /// Not a reply and not an ESC in its application: the line was low at the first sample or
-    /// had a low longer than 3.5 nominal bits. A bootloader that is transmitting looks like this.
+    /// The line was low at the first sample or had a low longer than 3.5 nominal bits.
+    /// This waveform can come from a bootloader or from an application's late reply after a
+    /// tune. It is never accepted as a reply; which of the two it was cannot be told from one
+    /// capture.
     Foreign,
 }
 
@@ -368,7 +373,7 @@ const fn levels_of(toggles: u32) -> u32 {
 /// `words` are the RX FIFO words in the order they were received, see the module documentation
 /// for the layout; at most [`MAX_WORDS`] are read. `samples_per_bit` is the number of samples in
 /// one nominal reply bit, [`Rate::reply_samples_per_bit`](crate::Rate::reply_samples_per_bit)
-/// (16 at both rates); a number outside [`MIN_SAMPLES_PER_BIT`] to [`MAX_SAMPLES_PER_BIT`] is
+/// (8 at both rates); a number outside [`MIN_SAMPLES_PER_BIT`] to [`MAX_SAMPLES_PER_BIT`] is
 /// taken as the nearest of them. An empty `words` gives [`CaptureError::CutOff`] on every line.
 ///
 /// Integer arithmetic only, no division, no allocation, no loop over single samples, no panic.
@@ -758,18 +763,19 @@ mod tests {
     #[test]
     fn decode_capture_the_stopped_motor_with_the_timing_measured_on_2026_11_12() {
         // Probe, m1 note: the reply starts 26.0 us (DShot300) or 23.5 us (DShot600) after our
-        // last rising edge, the bit takes 2572 ns or 1285 ns. The first sample is 12 PIO cycles
-        // after that edge and one sample is 2 PIO cycles. At 12 MHz and 24 MHz, in samples:
-        // start (26.0 us * 12 MHz - 12) / 2 = 150.0, and 2572 ns / (2 / 12 MHz) = 15.43;
-        // (23.5 us * 24 MHz - 12) / 2 = 276.0, and 1285 ns / (2 / 24 MHz) = 15.42.
+        // last rising edge, the bit takes 2572 ns or 1285 ns. In the back-end's program the
+        // first sample is 13 PIO cycles after that edge and one sample is 4 PIO cycles. At
+        // 12 MHz and 24 MHz, in samples: start (26.0 us * 12 MHz - 13) / 4 = 74.75, and
+        // 2572 ns / (4 / 12 MHz) = 7.72; (23.5 us * 24 MHz - 13) / 4 = 137.75, and
+        // 1285 ns / (4 / 24 MHz) = 7.71.
         for (rate, start_us, bit_ns, cycles_per_us) in [
             (Rate::Dshot300, 26.0, 2572.0, 12.0),
             (Rate::Dshot600, 23.5, 1285.0, 24.0),
         ] {
-            let sample_ns = 2000.0 / cycles_per_us;
-            let start = (start_us * cycles_per_us - 12.0) / 2.0;
+            let sample_ns = 4000.0 / cycles_per_us;
+            let start = (start_us * cycles_per_us - 13.0) / 4.0;
             let bit = bit_ns / sample_ns;
-            assert!((bit - 15.43_f64).abs() < 0.02, "{bit}");
+            assert!((bit - 7.715_f64).abs() < 0.01, "{bit}");
             // The four lines start up to 0.67 us apart.
             let spread = [0.0, 0.15, 0.4, 0.67];
             for seen in [
@@ -869,6 +875,35 @@ mod tests {
         assert_eq!(got[1], LineCapture::Invalid(CaptureError::CutOff));
         assert_eq!(got[2], LineCapture::Invalid(CaptureError::CutOff));
         assert_eq!(got[0], LineCapture::Silent);
+    }
+
+    #[test]
+    fn decode_capture_low_at_end_is_cutoff_at_every_line_position() {
+        for n in [8, 16] {
+            let mut edges: Vec<usize> = reply_edges(0x52951, 32.0, f64::from(n))
+                .into_iter()
+                .map(|edge| edge as usize)
+                .collect();
+            // End at the stopped reply's final rising edge, after 20 whole bits. This
+            // isolates the final level check: the window is long enough, and the last
+            // low is only three bits, so neither the length nor Foreign checks apply.
+            let samples = edges.pop().unwrap();
+            assert_eq!(samples, 32 + 20 * n as usize);
+            assert_eq!(samples % 8, 0);
+            let cut = line_of(&edges, samples);
+            edges.push(samples - 1);
+            let whole = line_of(&edges, samples);
+            let baseline = core::array::from_fn(|_| whole.clone());
+            let expected = [reply_for(0xFFF); LINES];
+            assert_eq!(decode_capture(&pack(&baseline), n), expected);
+            for line in 0..LINES {
+                let mut lines = baseline.clone();
+                lines[line] = cut.clone();
+                let mut want = expected;
+                want[line] = LineCapture::Invalid(CaptureError::CutOff);
+                assert_eq!(decode_capture(&pack(&lines), n), want, "line {line}, n {n}");
+            }
+        }
     }
 
     #[test]

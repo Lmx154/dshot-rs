@@ -1,8 +1,9 @@
 //! Timing of the PIO program as pure functions of the rate and clk_sys.
 //!
-//! Everything here derives from the measurement program `dshot_m1_probe` (its PIO program and
-//! its divider table) and from the capture windows measured with it on 2026-11-12. None of it
-//! is a hot path: the back-end calls these once when it is built.
+//! Everything here derives from the measurement program `dshot_m1_probe` (its bit timing and its
+//! divider table), from the capture windows measured with it on 2026-11-12, and from the PIO
+//! program of the back-end ([`crate::program`]), which samples at 4 PIO cycles. None of it is a
+//! hot path: the back-end calls these once when it is built.
 
 /// The DShot rates an AM32 ESC accepts. DShot150 is not here: AM32 rejects it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -46,8 +47,8 @@ pub enum DividerError {
 impl Rate {
     /// PIO cycles in one bit, the same at both rates: 15 low, 15 data, 10 high.
     pub const CYCLES_PER_BIT: u32 = 40;
-    /// PIO cycles of one reply sample (`in pins, 4` and `jmp x--`).
-    pub const REPLY_SAMPLE_CYCLES: u32 = 2;
+    /// PIO cycles of one reply sample (`in pins, 4 [2]` and `jmp x--`).
+    pub const REPLY_SAMPLE_CYCLES: u32 = 4;
     /// Samples in one RX word (autopush after 8 four-bit samples).
     pub const SAMPLES_PER_WORD: u32 = 8;
     /// The accepted error of the bit rate, in thousandths: 5 is 0.5 %.
@@ -116,17 +117,18 @@ impl Rate {
         })
     }
 
-    /// Nominal reply samples per reply bit: 16 at both rates.
+    /// Nominal reply samples per reply bit: 8 at both rates.
     ///
     /// The ESC's reply bit is 4/5 of a command bit (it is the 5/4 rate), that is 32 PIO cycles;
-    /// one sample takes [`Rate::REPLY_SAMPLE_CYCLES`] = 2 cycles. (AM32's reply is about 3.5 %
-    /// faster than nominal, measured; see the README.)
+    /// one sample takes [`Rate::REPLY_SAMPLE_CYCLES`] = 4 cycles. Eight is the rate the design
+    /// fixes for the decode budget (decision of 2026-11-12, third amendment). AM32's reply is
+    /// about 3.5 % faster than nominal (measured, `_plan/m1-dshot-reply-timing.md`).
     #[must_use]
     pub const fn reply_samples_per_bit(self) -> u32 {
         Self::CYCLES_PER_BIT * 4 / 5 / Self::REPLY_SAMPLE_CYCLES
     }
 
-    /// PIO cycles between two reply samples: 2, so 6.0 MS/s at DShot300 and 12.0 MS/s at DShot600.
+    /// PIO cycles between two reply samples: 4, so 3.0 MS/s at DShot300 and 6.0 MS/s at DShot600.
     #[must_use]
     pub const fn reply_sample_cycles(self) -> u32 {
         Self::REPLY_SAMPLE_CYCLES
@@ -147,15 +149,16 @@ impl Rate {
     }
 
     /// RX FIFO words in one capture: the window of [`Rate::capture_window_ns`] in whole words,
-    /// rounded up, which is 68 at DShot300 and 91 at DShot600.
+    /// rounded up, which is 34 at DShot300 and 46 at DShot600.
     ///
-    /// One word is 8 samples of 2 cycles = 16 PIO cycles, and the PIO clock is fixed by the rate
+    /// One word is 8 samples of 4 cycles = 32 PIO cycles, and the PIO clock is fixed by the rate
     /// (the divider of [`Rate::clock_divider`]), so the count does not depend on clk_sys. The 10
     /// us of margin inside the window is the only margin, plus the rounding up (at most one word,
-    /// 1.33 us or 0.67 us). The samples are `8 * words`; the program is loaded with that minus 1.
+    /// 2.67 us or 1.33 us): 90.67 us and 61.33 us are sampled. The samples are `8 * words`; the
+    /// program is loaded with that minus 1.
     #[must_use]
     pub const fn capture_words(self) -> u32 {
-        // window_ns * pio_clock_khz / (1e6 * 16 cycles per word); the product is at most
+        // window_ns * pio_clock_khz / (1e6 * 32 cycles per word); the product is at most
         // 1.45e9, inside a u32.
         let num = self.capture_window_ns() * (self.pio_clock_hz() / 1000);
         let den = 1_000_000 * Self::REPLY_SAMPLE_CYCLES * Self::SAMPLES_PER_WORD;
@@ -299,10 +302,10 @@ mod tests {
     }
 
     #[test]
-    fn reply_samples_per_bit_is_16_and_reply_sample_cycles_is_2() {
+    fn reply_samples_per_bit_is_8_and_reply_sample_cycles_is_4() {
         for r in BOTH {
-            assert_eq!(r.reply_samples_per_bit(), 16);
-            assert_eq!(r.reply_sample_cycles(), 2);
+            assert_eq!(r.reply_samples_per_bit(), 8);
+            assert_eq!(r.reply_sample_cycles(), 4);
             // The reply bit is 4/5 of a command bit.
             assert_eq!(
                 r.reply_samples_per_bit() * r.reply_sample_cycles() * 5,
@@ -319,15 +322,31 @@ mod tests {
 
     #[test]
     fn capture_words_cover_the_window_with_less_than_one_word_extra() {
-        assert_eq!(Rate::Dshot300.capture_words(), 68);
-        assert_eq!(Rate::Dshot600.capture_words(), 91);
+        assert_eq!(Rate::Dshot300.capture_words(), 34);
+        assert_eq!(Rate::Dshot600.capture_words(), 46);
         for r in BOTH {
-            // A word is 16 PIO cycles, in nanoseconds at the PIO clock.
-            let word_ns = 16.0e9 / f64::from(r.pio_clock_hz());
+            // A word is 32 PIO cycles, in nanoseconds at the PIO clock.
+            let word_ns = 32.0e9 / f64::from(r.pio_clock_hz());
             let covered = f64::from(r.capture_words()) * word_ns;
             let window = f64::from(r.capture_window_ns());
             assert!(covered >= window, "{r:?}");
             assert!(covered - window < word_ns, "{r:?}");
+        }
+    }
+
+    #[test]
+    fn clock_divider_clamps_to_one_at_the_half_percent_lower_clock_boundary() {
+        for rate in BOTH {
+            let lowest_clock = rate.pio_clock_hz() / 1000 * 995;
+            assert_eq!(rate.clock_divider(lowest_clock).unwrap().as_q8(), 256);
+            assert_eq!(
+                rate.clock_divider(lowest_clock - 1),
+                Err(DividerError::ClockTooSlow)
+            );
+            assert_eq!(
+                rate.clock_divider(rate.pio_clock_hz()).unwrap().as_q8(),
+                256
+            );
         }
     }
 
@@ -352,7 +371,8 @@ mod tests {
         fn clock_divider_rounds_to_the_nearest_256th(clk in 12_000_000u32..=400_000_000) {
             for r in BOTH {
                 if let Ok(d) = r.clock_divider(clk) {
-                    let exact = f64::from(clk) / f64::from(r.pio_clock_hz());
+                    // Below the requested PIO clock, the legal divider is clamped to 1.0.
+                    let exact = (f64::from(clk) / f64::from(r.pio_clock_hz())).max(1.0);
                     let got = f64::from(d.as_q8()) / 256.0;
                     prop_assert!((exact - got).abs() <= 0.5 / 256.0 + 1e-12);
                 }
