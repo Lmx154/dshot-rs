@@ -3,13 +3,14 @@
 # its report lines. The exit status is the firmware's verdict: 0 pass, 1 fail; a timeout or a
 # crash gives another status. The full log is kept under hil/logs/.
 #
-# Usage: tools/run.sh <bin> [timeout_seconds, default 120]
+# Usage: tools/run.sh <bin> [timeout_seconds, default 120] [features of the hil crate, default none]
 set -u
-bin="${1:?usage: tools/run.sh <bin> [timeout_seconds]}"
+bin="${1:?usage: tools/run.sh <bin> [timeout_seconds] [features]}"
 tmo="${2:-120}"
+features="${3:-}"
 cd "$(dirname "$0")/../hil" || exit 1
 
-cargo build --release --workspace --bin "$bin" || exit $?
+cargo build --release --workspace --bin "$bin" ${features:+--features "$features"} || exit $?
 
 mkdir -p logs
 log="logs/${bin}-$(date +%Y%m%d-%H%M%S).log"

@@ -9,6 +9,15 @@ license = "MIT"
 [lib]
 name = "hil_common"
 
+[features]
+# The bench program that sends throttle to the motors (src/bin/dshot_spin.rs). Never in the
+# default build; it needs DSHOT_SPIN_CAP and DSHOT_SPIN_ERPM_MAX at build time.
+motor-test = ["dep:adc-battery"]
+
+[[bin]]
+name = "dshot_spin"
+required-features = ["motor-test"]
+
 [dependencies]
 embassy-executor = { version = "0.10.0", features = ["platform-cortex-m", "executor-thread", "executor-interrupt", "defmt"] }
 embassy-time = { version = "0.5.1", features = ["defmt", "defmt-timestamp-uptime"] }
@@ -22,6 +31,7 @@ panic-probe = { version = "1.0.0", features = ["print-defmt"] }
 semihosting = "0.1"
 fixed = "1.31"
 dshot = { path = "..", features = ["embassy-rp-0-10", "defmt"] }
+adc-battery = { path = "../../adc-battery", optional = true }
 
 [profile.release]
 debug = true

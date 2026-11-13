@@ -2,7 +2,7 @@
 
 Bidirectional DShot for AM32 ESCs on four motor lines, `no_std`. Two parts. The core is pure integer code with no dependency and does no I/O; it works on any chip: the values a caller may send, the frame encoder with the inverted checksum, the two-word frame image for a PIO program that drives four consecutive pins in step, the timing constants of that program, the decoding of an ESC's reply word into eRPM or extended telemetry, the turning of the pin samples of a reply window into one result per motor line, and the decoding of the serial telemetry frames of an AM32 ESC. The optional back-end `PioDshot` (feature `embassy-rp-0-10`, embassy-rp 0.10, RP2350) runs that program on one PIO state machine, captures the replies by DMA and carries out the start sequence. The chip feature (`rp235xa` or `rp235xb`) comes from the application. `defmt` 1.x is optional. It is written for the MARV V2 Rev 1 flight controller (RP2350, four AM32 ESCs on GPIO36-39) and takes the clock and the rate as parameters.
 
-Status: version 0.1.0, `publish = false`, and the API may still change. `PioDshot` has been tested on a MARV V2 Rev 1 board with four AM32 2.20 ESCs, at DShot300 and DShot600, with no motors and with zero throttle (Stop frames) only (2026-11-12, see "Measured on the MARV V2 Rev 1 board"). No motor has been spun with it.
+Status: version 0.1.0, `publish = false`, and the API may still change. `PioDshot` has been tested on a MARV V2 Rev 1 board with four AM32 2.20 ESCs, at DShot300 and DShot600, with no motors and with zero throttle (Stop frames) only (2026-11-12), and with four motors fitted, spun one at a time at up to 5 % throttle without propellers (2026-11-13); see "Measured on the MARV V2 Rev 1 board". Nothing above 5 % throttle, no propellers and no two motors at once have been tested.
 
 ## Works with
 
@@ -206,6 +206,8 @@ What an application will see on the four ESCs of the bench board (AM32 2.20, boo
 - The armed signal timeout is a fixed count of about 510 ms; not armed it is 2 s. Then the ESC resets.
 - Arming. About 0.8 to 1.1 s after its first good reply, each ESC arms and plays a tune with its interrupts off, and does not reply for about 300 exchanges at 1 kHz (299 to 301 measured). Then it sends one late reply (a stopped-motor reply, 0x52951) at an instant that is not tied to our frame, and the next exchange or the next two can also be odd: `Foreign`, `Invalid` or `Silent`, because the capture of the ESC is re-armed with no frame-start trigger after the tune and a reply goes out for every capture it completes, even a rejected one. Then a reply on every exchange. The same follows any other tune the ESC plays with interrupts off. A line that is `Live` can therefore show non-replies at the end of its arming; that is not by itself a fault.
 - Overlap. Once per interrupt-off tune a controller's late reply may start under our frame: a push-pull fight of at most one frame (53 us at DShot300) on that line. Our frame stays whole (on the bench: 3 of 3 times it was seen); the controller misses that frame and answers the next; a cut frame cannot be read as a value by the ESC (AM32's frame-time window). The RP2350 datasheet (section 14.9.1) sets no pin current limit. The level during the fight was not measured, and it was not tried with motors fitted.
+- First start after a reset. An ESC that has been told to run reports a period of 2 us (raw eRPM value 0x002, 30 000 000 eRPM) until its first commutation, because its interval buffer is still zero (`Src/main.c:1840`, `running` set at `main.c:1165`; AM32 v2.20). Seen on the bench for 0 frames on two ESCs, 1 frame on one and 8 to more than 10 frames (8 to 11 ms) on another, at 1 kHz. It is a checksum-valid reply; an application must not treat an eRPM above what the motor can do as a speed (Betaflight applies no per-sample limit either).
+- With extended telemetry on, about 3 % of the replies were extended frames (66 to 69 of 2000 per burst).
 
 ## What the crate does
 
@@ -224,9 +226,9 @@ What an application will see on the four ESCs of the bench board (AM32 2.20, boo
 
 ## Not covered
 
-- No motor has been spun with this crate: no throttle above zero was ever sent on the bench and no RPM value other than "stopped" was received. Behaviour with a motor connected or turning is untested.
+- Motors have been spun with this crate at up to 5 % throttle, one at a time, unloaded (no propellers), on 2026-11-13. Nothing above 5 % throttle, no propellers and no two motors at once have been tested.
 - The serial telemetry of the ESC: the telemetry UART, the request bit's effect on the telemetry wire, how the four ESCs share that wire, and the delay from a request to the first byte. `Framer` is tested on host only.
-- Extended DShot telemetry and the beep and settings commands (`Command`) are untested on hardware.
+- Extended DShot telemetry and command 13 (`Command::ExtendedTelemetryOn`) are tested on hardware (the acknowledge and the voltage, current and temperature frames were received). The beep commands and `Command::ExtendedTelemetryOff` are untested on hardware.
 - Only AM32 2.20 (bootloader version 1, on the GOKU G55M 4-in-1 of the MARV V2 Rev 1 bench) and only the RP2350 with embassy-rp 0.10 were tested. `PioDshot` cannot be used on other chips; the core can.
 - Frame rates other than 1 kHz in the board test of the back-end, and sparse frames beyond what the records in "Cadence" show.
 - The level fight during an overlap of a late reply and our frame (needs an analogue measurement).
@@ -239,6 +241,8 @@ Host: `cargo test` (141 unit tests, the proptests, the compile-fail doctests for
 
 On the board: `tools/run.sh dshot_smoke <timeout_seconds>` (it takes the machine-wide probe lock and keeps its log under `hil/logs/`, which git ignores). It builds `PioDshot` on PIO2 and GPIO36-39 and watches the lines with four run-length observers on PIO0 (13.3 ns resolution, DMA rings), independent of the driver, at DShot300 and DShot600. Every frame it sends is `LineFrame::STOP`; it builds no `Throttle` and no `Command`. It prints `[PASS]`/`[FAIL]`/`[STAT]`/`[INFO]` lines and `RESULT: PASS|FAIL`.
 
+The spin test: `DSHOT_SPIN_CAP=<cap> DSHOT_SPIN_ERPM_MAX=<limit> tools/run.sh dshot_spin 180 motor-test`. It is the only program that sends a throttle, and it is excluded from the default build (hil feature `motor-test`). Before any throttle it checks that every line is past its arming tune, that command 13 is acknowledged on its own line only, and that the battery voltage is in range. Then it spins one motor at a time in three rising steps to the cap, in bursts of 2 s with 1 s or more of Stop between. Its guards, as implemented in the file: the cap is set at build time and the build is refused above 200, and it is checked again on every frame; no burst is longer than 3 s and the throttle phase is at most 60 s; the run stops by itself on 10 missing replies in a row, on 10 eRPM replies in a row above the limit, or on 300 "not started yet" replies in a row (see "What the AM32 2.20 controllers do"); every ending sends Stop on all four lines for 1 s or more.
+
 ## Measured on the MARV V2 Rev 1 board
 
 2026-11-12, `clk_sys` 150 MHz, RP2350, four AM32 2.20 ESCs on GPIO36-39, battery connected, NO motors, zero throttle (Stop frames) only. Six full runs of `hil/src/bin/dshot_smoke.rs`, each `RESULT: PASS` with no failed check, at DShot300 and DShot600. The logs are bench records, kept locally (`hil/logs/` is not in git): `dshot_smoke-20261112-224418.log`, `-224650`, `-224809`, `-224940` (the last three consecutive, with no source change between them), `-230019` (the reviewer's run) and `-230510` (the source as committed: the same program after `cargo fmt` and with one more assertion, that no short pulse or off-grid edge of the driver was recorded anywhere in the run; it counted 0). The figures below are from the first five.
@@ -248,6 +252,14 @@ On the board: `tools/run.sh dshot_smoke <timeout_seconds>` (it takes the machine
 - Release and rebuild: 100 build/release cycles with no edge on any line; the next `start()` brought all four ESCs back to 100 consecutive good replies.
 - Host tests: 141 unit, 5 doctests that run and 6 compile-fail doctests (144 unit with `_test-hooks`).
 - Other bench records used in this README: `dshot_m1_probe-20261112-134808.log` (reply timing, capture window, shortest frame period), `dshot_m8_startup-20261112-154050.log` and `-154156` (the 0.54 s hold), `dshot_m10_arming-20261112-175413.log` (the late reply at the end of the arming silence), `dshot_m9_gaps-20261112-174203.log` (the cut-off gaps), `dshot_m11_cadence-20261112-213609.log` (the lone frame every 0.4 s).
+
+2026-11-13, four Emax ECO II 2807 1700KV motors (14 magnets, 7 pole pairs) soldered on, 4S battery at 15.07 V (the board's ADC), no propellers.
+
+- Three more consecutive full runs of `dshot_smoke` at zero throttle with the motors attached, each `RESULT: PASS`, 101 checks passed, none failed: `dshot_smoke-20261113-022722.log`, `-022838`, `-022952`. The figures were the same as without motors: per line 2707 to 2710 good replies, 289 to 292 without a reply in one block, 0 or 1 odd exchange at its end, none elsewhere.
+- Spin test, cap 100 of 2000 (5 %), limit 30 000 eRPM, DShot300, 1 kHz: `dshot_spin-20261113-030326.log`, `RESULT: PASS`, 32 checks passed, none failed. Median eRPM over the second half of each 2 s burst, at throttle 33 / 66 / 100 of 2000: M1 (GPIO39) 6355 / 9640 / 12755; M2 (GPIO38) 6127 / 9664 / 13489; M3 (GPIO37) 6487 / 9715 / 12886; M4 (GPIO36) 6334 / 9791 / 13020. At 7 pole pairs, 5 % is about 1820 to 1930 rpm. While one motor ran, the other three reported "stopped" in every eRPM reply. No automatic stop fired. Longest push-to-push spacing 1021 us over 42 015 frames. Every line reported "stopped" within the 1 s of Stop after each burst.
+- Two earlier runs the same night stopped themselves on M3 and are part of the record: `dshot_spin-20261113-025527.log` (the limit was then a single reading; M3's second throttle frame got the 2 us reply) and `-025833.log` (ten readings in a row; M3 gave the 2 us reply for all 11 of its throttle frames). In both, M1 and M2 completed their three steps and every motor ended stopped. The rule was then changed to count such replies apart, and the third run passed.
+- Extended telemetry as reported by the ESCs themselves (not checked against a reference; reported, not used): voltage 16.0 V on M1's ESC and 15.25 V on M2's against 15.07 V on the board; temperature 45 and 31 degC; current 153 to 160 A on both, also with the motor stopped, which is an offset or scale of the ESC's own current sense and not a current.
+- Direction is not visible to the program. Seen by the owner: M1 counter-clockwise, M2 clockwise; M3 and M4 not yet noted.
 
 ## Features, layout, licence
 
@@ -260,7 +272,7 @@ src/         value.rs (Throttle, Command, Value, LineFrame), frame.rs (FrameImag
              LineCapture, CaptureStats), telemetry.rs (Framer, Telemetry), program.rs (the PIO
              program), link.rs (PARK_MS, BREAK_MS, LineState, LineMonitor), pio_dshot.rs (PioDshot)
 hil/         on-board programs, among them dshot_smoke and dshot_m1_probe (own workspace; src/bin/,
-             logs/ is git-ignored)
+             logs/ is git-ignored); dshot_spin, the throttle test, only with the feature motor-test
 tools/       run.sh: builds a hil/ program, flashes and runs it under the machine-wide probe lock
 LICENSE      MIT
 ```
